@@ -795,6 +795,11 @@ class ProtocolMixin(object):
 
         raise Exception("Unexpected result %s" % resp)
 
+    @field('message')
+    @expect(proto.Success)
+    def benchmark(self, func, rep, data1, data2):
+        return self.call(proto.Benchmark(function=func, repetitions=rep, data1=data1, data2=data2))
+
 class TrezorClient(ProtocolMixin, TextUIMixin, BaseClient):
     pass
 

@@ -8,7 +8,7 @@ class ConnectionError(Exception):
     pass
 
 class Transport(object):
-    def __init__(self, device, *args, **kwargs):
+    def open(self, device, *args, **kwargs):
         self.device = device
         self.session_depth = 0
         self._open()

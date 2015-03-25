@@ -38,44 +38,40 @@ def parse_args(commands):
     
     return parser.parse_args()
 
-def get_transport(transport_string, path, **kwargs):
+def get_transport(transport_string):
     if transport_string == 'usb':
         from trezorlib.transport_hid import HidTransport
-
-        if path == '':
-            try:
-                path = list_usb()[0][0]
-            except IndexError:
-                raise Exception("No Trezor found on USB")
-
-        for d in HidTransport.enumerate():
-            # Two-tuple of (normal_interface, debug_interface)
-            if path in d:
-                return HidTransport(d, **kwargs)
-
-        raise Exception("Device not found")
+        return HidTransport()
  
     if transport_string == 'serial':
         from trezorlib.transport_serial import SerialTransport
-        return SerialTransport(path, **kwargs)
+        return SerialTransport()
 
     if transport_string == 'pipe':
         from trezorlib.transport_pipe import PipeTransport
-        return PipeTransport(path, is_device=False, **kwargs)
+        return PipeTransport(is_device=false)
     
     if transport_string == 'socket':
         from trezorlib.transport_socket import SocketTransportClient
-        return SocketTransportClient(path, **kwargs)
+        return SocketTransportClient()
 
     if transport_string == 'bridge':
         from trezorlib.transport_bridge import BridgeTransport
-        return BridgeTransport(path, **kwargs)
+        return BridgeTransport()
     
     if transport_string == 'fake':
         from trezorlib.transport_fake import FakeTransport
-        return FakeTransport(path, **kwargs)
+        return FakeTransport()
     
     raise NotImplemented("Unknown transport")
+
+def open_transport(transport, path, **kwargs):
+    if path == '':
+        try:
+            path = transport.enumerate()[0][0]
+        except IndexError:
+            raise Exception("No Trezor found")
+    transport.open(path, **kwargs)
 
 class Commands(object):
     def __init__(self, client):
@@ -212,6 +208,11 @@ class Commands(object):
         fp.seek(0)
         return self.client.firmware_update(fp=open(args.file, 'r'))
 
+    def benchmark(self, args):
+        data1 = args.data1.decode('hex');
+        data2 = args.data2.decode('hex');
+        return self.client.benchmark(args.funcnr, args.rep, data1, data2)
+
     list.help = 'List connected Trezor USB devices'
     ping.help = 'Send ping message'
     get_address.help = 'Get bitcoin address in base58 encoding'
@@ -234,6 +235,7 @@ class Commands(object):
     encrypt_keyvalue.help = 'Encrypt value by given key and path'
     decrypt_keyvalue.help = 'Decrypt value by given key and path'
     firmware_update.help = 'Upload new firmware to device (must be in bootloader mode)'
+    benchmark.help = 'Benchmark a function'
 
     get_address.arguments = (
         (('-c', '--coin'), {'type': str, 'default': 'Bitcoin'}),
@@ -337,10 +339,13 @@ class Commands(object):
         (('-f', '--file'), {'type': str}),
     )
 
-def list_usb():
-    from trezorlib.transport_hid import HidTransport
-    return HidTransport.enumerate()
-
+    benchmark.arguments = (
+        (('-f', '--funcnr'), {'type': int, 'default': 0}),
+        (('-r', '--rep'), {'type': int, 'default': 100}),
+        (('-a', '--data1'), {'type': str, 'default': '00'}),
+        (('-b', '--data2'), {'type': str, 'default': '00'}),
+    )
+    
 '''
 class PinMatrixThread(threading.Thread):
     # Hacked PinMatrixWidget into command line tool :-).
@@ -399,8 +404,9 @@ def qt_pin_func(input_text, message=None):
 def main():
     args = parse_args(Commands)
 
+    transport = get_transport(args.transport)
     if args.cmd == 'list':
-        devices = list_usb()
+        devices = transport.enumerate()
         if args.json:
             print json.dumps(devices)
         else:
@@ -411,7 +417,7 @@ def main():
                     print dev[0]
         return
 
-    transport = get_transport(args.transport, args.path)
+    open_transport(transport, args.path)
     if args.verbose:
         client = TrezorClientDebug(transport)
     else:
@@ -426,6 +432,8 @@ def main():
         print json.dumps(res, sort_keys=True, indent=4)
     else:
         print res
+
+    client.close()
     
 if __name__ == '__main__':
     main()

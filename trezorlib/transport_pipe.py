@@ -6,12 +6,12 @@ from select import select
 from transport import Transport
 
 class PipeTransport(Transport):
-    def __init__(self, device, is_device, *args, **kwargs):
+    def __init__(is_device):
         self.is_device = is_device # Set True if act as device
         
-        super(PipeTransport, self).__init__(device, *args, **kwargs)        
+        super(PipeTransport, self).__init__()        
         
-    def _open(self):
+    def _open():
         if self.is_device:
             self.filename_read = self.device+'.to'
             self.filename_write = self.device+'.from'

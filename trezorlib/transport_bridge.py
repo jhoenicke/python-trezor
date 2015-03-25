@@ -14,7 +14,13 @@ def get_error(resp):
     return ' (error=%d str=%s)' % (resp.status_code, resp.json()['error'])
 
 class BridgeTransport(Transport):
-    def __init__(self, device, *args, **kwargs):
+    def __init__(self):
+        self.conn = requests.Session();
+        r = self.conn.get(TREZORD_HOST)
+        if r.status_code != 200:
+            raise Exception('trezord: Could not connect to bridge' + get_error(r))
+        if r.json()['configured']:
+            return
 
         r = requests.get(CONFIG_URL)
         if r.status_code != 200:
@@ -22,28 +28,27 @@ class BridgeTransport(Transport):
 
         config = r.text
 
-        self.conn = requests.Session();
-
         r = self.conn.post(TREZORD_HOST + '/configure', data=config)
         if r.status_code != 200:
             raise Exception('trezord: Could not configure' + get_error(r))
 
-        r = self.conn.get(TREZORD_HOST + '/enumerate')
-        if r.status_code != 200:
-            raise Exception('trezord: Could not enumerate devices' + get_error(r))
-        enum = r.json()
-
-        if len(enum) < 1:
-            raise Exception('trezord: No devices found')
-
-        self.path = enum[0]['path']
         self.session = None
         self.response = None
 
-        super(BridgeTransport, self).__init__(device, *args, **kwargs)
+    def enumerate(self):
+        """
+        Return a list of available TREZOR devices.
+        """
+        r = self.conn.get(TREZORD_HOST + '/enumerate')
+        if r.status_code != 200:
+            raise Exception('trezord: Could not enumerate devices' + get_error(r))
+        devices=[]
+        for d in r.json():
+            devices.append([d['path'], None])
+        return devices
 
     def _open(self):
-        r = self.conn.post(TREZORD_HOST + '/acquire/%s' % self.path)
+        r = self.conn.post(TREZORD_HOST + '/acquire/%s' % self.device)
         if r.status_code != 200:
             raise Exception('trezord: Could not acquire session' + get_error(r))
         resp = r.json()
