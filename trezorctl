@@ -107,6 +107,11 @@ def get_transport(transport_name, path):
     dev = transport.find_by_path(path)
     return dev
 
+def ethereum_decode_hex(value):
+    if value.startswith('0x') or value.startswith('0X'):
+        return value[2:].decode('hex')
+    else:
+        return value.decode('hex')
 
 class Commands(object):
     def __init__(self, client):
@@ -161,11 +166,7 @@ class Commands(object):
         if gas_limit is not None:
             gas_limit = int(gas_limit)
 
-        if args.to.startswith('0x') or args.to.startswith('0X'):
-            to_address = args.to[2:].decode('hex')
-        else:
-            to_address = args.to.decode('hex')
-
+        to_address = ethereum_decode_hex(args.to)
         nonce = args.nonce
         if nonce:
             nonce = int(nonce)
@@ -179,9 +180,7 @@ class Commands(object):
 
         if not args.data:
             args.data = ''
-        elif args.data.startswith('0x'):
-            args.data = args.data[2:]
-        data = binascii.unhexlify(args.data)
+        data = ethereum_decode_hex(args.data)
 
         if gas_price is None:
             gas_price = eth.eth_gasPrice()
@@ -216,6 +215,21 @@ class Commands(object):
         else:
             return 'Signed raw transaction: %s' % tx_hex
 
+    def ethereum_sign_message(self, args):
+        address_n = self.client.expand_path(args.n)
+        ret = self.client.ethereum_sign_message(address_n, args.message)
+        output = {
+            "msg": args.message,
+            "address": "0x" + binascii.hexlify(ret.address).decode('ascii'),
+            "sig": "0x" + binascii.hexlify(ret.signature).decode('ascii')
+        }
+        return output
+
+    def ethereum_verify_message(self, args):
+        address = ethereum_decode_hex(args.address)
+        signature = ethereum_decode_hex(args.signature)
+        return self.client.ethereum_verify_message(address, signature, args.message)
+
     def get_entropy(self, args):
         return binascii.hexlify(self.client.get_entropy(args.size))
 
@@ -230,7 +244,17 @@ class Commands(object):
 
     def get_public_node(self, args):
         address_n = self.client.expand_path(args.n)
-        return self.client.get_public_node(address_n, ecdsa_curve_name=args.curve, show_display=args.show_display, coin_name=args.coin)
+        result = self.client.get_public_node(address_n, ecdsa_curve_name=args.curve, show_display=args.show_display, coin_name=args.coin)
+        output = {
+            'node': { 'depth': result.node.depth,
+                      'fingerprint': "%08x" % result.node.fingerprint,
+                      'child_num': result.node.child_num,
+                      'chain_code': binascii.hexlify(result.node.chain_code),
+                      'public_key': binascii.hexlify(result.node.public_key)},
+            'xpub': result.xpub
+        }
+        return output
+
 
     def enable_passphrase(self, args):
         return self.client.apply_settings(use_passphrase=True)
@@ -383,6 +407,8 @@ class Commands(object):
     get_address.help = 'Get bitcoin address in base58 encoding'
     ethereum_get_address.help = 'Get Ethereum address in hex encoding'
     ethereum_sign_tx.help = 'Sign (and optionally publish) Ethereum transaction'
+    ethereum_sign_message.help = 'Sign message with Ethereum address'
+    ethereum_verify_message.help = 'Verify message signed with Ethereum address'
     get_entropy.help = 'Get example entropy'
     get_features.help = 'Retrieve device features and settings'
     get_public_node.help = 'Get public node of given path'
@@ -432,6 +458,17 @@ class Commands(object):
         (('-d', '--data'), {'type': str, 'help': 'Data as hex string, e.g., 0x12345678', 'default': ''}),
         (('-p', '--publish'), {'action': 'store_true', 'help': 'publish transaction via RPC', 'default': False}),
         (('to',), {'type': str, 'help': 'Destination address; "" for contract creation'}),
+    )
+
+    ethereum_sign_message.arguments = (
+        (('-n', '-address'), {'type': str, 'help': 'BIP-32 path to signing key'}),
+        (('message',), {'type': str}),
+    )
+
+    ethereum_verify_message.arguments = (
+        (('address',), {'type': str}),
+        (('signature',), {'type': str}),
+        (('message',), {'type': str}),
     )
 
     get_entropy.arguments = (
@@ -604,4 +641,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-    
