@@ -23,72 +23,23 @@ import pytest
 import os
 
 from trezorlib.client import TrezorClient, TrezorClientDebugLink
+from trezorlib.transport import get_transport
 from trezorlib import tx_api
 
 tests_dir = os.path.dirname(os.path.abspath(__file__))
 tx_api.cache_dir = os.path.join(tests_dir, '../txcache')
 
 
-try:
-    from trezorlib.transport_hid import HidTransport
-    HID_ENABLED = True
-except ImportError as e:
-    print('HID transport disabled:', e)
-    HID_ENABLED = False
-
-try:
-    from trezorlib.transport_pipe import PipeTransport
-    PIPE_ENABLED = True
-except ImportError as e:
-    print('PIPE transport disabled:', e)
-    PIPE_ENABLED = False
-
-try:
-    from trezorlib.transport_udp import UdpTransport
-    UDP_ENABLED = True
-except ImportError as e:
-    print('UDP transport disabled:', e)
-    UDP_ENABLED = False
+def get_device():
+    path = os.environ.get('TREZOR_PATH')
+    return get_transport(path)
 
 
-def pipe_exists(path):
-    import os
-    import stat
-    try:
-        return stat.S_ISFIFO(os.stat(path).st_mode)
-    except:
-        return False
-
-
-def get_transport():
-    if HID_ENABLED and HidTransport.enumerate():
-        devices = HidTransport.enumerate()
-        wirelink = devices[0]
-        debuglink = devices[0].find_debug()
-
-    elif PIPE_ENABLED and pipe_exists('/tmp/pipe.trezor.to'):
-        wirelink = PipeTransport('/tmp/pipe.trezor', False)
-        debuglink = PipeTransport('/tmp/pipe.trezor_debug', False)
-
-    elif UDP_ENABLED:
-        wirelink = UdpTransport()
-        debuglink = UdpTransport()
-
-    return wirelink, debuglink
-
-
-if HID_ENABLED and HidTransport.enumerate():
-    print('Using TREZOR')
-elif PIPE_ENABLED and pipe_exists('/tmp/pipe.trezor.to'):
-    print('Using Emulator (v1=pipe)')
-elif UDP_ENABLED:
-    print('Using Emulator (v2=udp)')
-
-
-class TrezorTest(object):
+class TrezorTest:
 
     def setup_method(self, method):
-        wirelink, debuglink = get_transport()
+        wirelink = get_device()
+        debuglink = wirelink.find_debug()
         self.client = TrezorClientDebugLink(wirelink)
         self.client.set_debuglink(debuglink)
         self.client.set_tx_api(tx_api.TxApiBitcoin)
@@ -116,6 +67,9 @@ class TrezorTest(object):
 
     def setup_mnemonic_nopin_nopassphrase(self):
         self.client.load_device_by_mnemonic(mnemonic=self.mnemonic12, pin='', passphrase_protection=False, label='test', language='english')
+
+    def setup_mnemonic_nopin_passphrase(self):
+        self.client.load_device_by_mnemonic(mnemonic=self.mnemonic12, pin='', passphrase_protection=True, label='test', language='english')
 
     def setup_mnemonic_pin_nopassphrase(self):
         self.client.load_device_by_mnemonic(mnemonic=self.mnemonic12, pin=self.pin4, passphrase_protection=False, label='test', language='english')

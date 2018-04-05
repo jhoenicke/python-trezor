@@ -25,7 +25,6 @@ import time
 import binascii
 import hashlib
 import unicodedata
-import json
 import getpass
 import warnings
 
@@ -34,18 +33,14 @@ from mnemonic import Mnemonic
 from . import messages as proto
 from . import tools
 from . import mapping
+from . import nem
 from .coins import coins_slip44
 from .debuglink import DebugLink
-
-# Python2 vs Python3
-try:
-    input = raw_input
-except NameError:
-    pass
+from .protobuf import MessageType
 
 
 if sys.version_info.major < 3:
-    warnings.warn("Trezorlib will stop supporting Python2 in next versions.", DeprecationWarning)
+    raise Exception("Trezorlib does not support Python 2 anymore.")
 
 # try:
 #     from PIL import Image
@@ -56,19 +51,14 @@ if sys.version_info.major < 3:
 SCREENSHOT = False
 
 
-def getch():
-    try:
-        import termios
-    except ImportError:
-        # Non-POSIX. Return msvcrt's (Windows') getch.
-        import msvcrt
-        return msvcrt.getch()
-
-    # POSIX system. Create and return a getch that manipulates the tty.
-    import sys
+# make a getch function
+try:
+    import termios
     import tty
+    # POSIX system. Create and return a getch that manipulates the tty.
+    # On Windows, termios will fail to import.
 
-    def _getch():
+    def getch():
         fd = sys.stdin.fileno()
         old_settings = termios.tcgetattr(fd)
         try:
@@ -78,7 +68,19 @@ def getch():
             termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
         return ch
 
-    return _getch()
+except ImportError:
+    # Windows system.
+    # Use msvcrt's getch function.
+    import msvcrt
+
+    def getch():
+        while True:
+            key = msvcrt.getch()
+            if key in (0x00, 0xe0):
+                # skip special keys: read the scancode and repeat
+                msvcrt.getch()
+                continue
+            return key.decode('latin1')
 
 
 def get_buttonrequest_value(code):
@@ -86,13 +88,46 @@ def get_buttonrequest_value(code):
     return [k for k in dir(proto.ButtonRequestType) if getattr(proto.ButtonRequestType, k) == code][0]
 
 
+def format_protobuf(pb, indent=0, sep=' ' * 4):
+    def pformat_value(value, indent):
+        level = sep * indent
+        leadin = sep * (indent + 1)
+        if isinstance(value, MessageType):
+            return format_protobuf(value, indent, sep)
+        if isinstance(value, list):
+            lines = []
+            lines.append('[')
+            lines += [leadin + pformat_value(x, indent + 1) + ',' for x in value]
+            lines.append(level + ']')
+            return '\n'.join(lines)
+        if isinstance(value, dict):
+            lines = []
+            lines.append('{')
+            for key, val in sorted(value.items()):
+                if val is None or val == []:
+                    continue
+                if key == 'address_n' and isinstance(val, list):
+                    lines.append(leadin + key + ': ' + repr(val) + ',')
+                else:
+                    lines.append(leadin + key + ': ' + pformat_value(val, indent + 1) + ',')
+            lines.append(level + '}')
+            return '\n'.join(lines)
+        if isinstance(value, bytearray):
+            return 'bytearray(0x{})'.format(binascii.hexlify(value).decode('ascii'))
+
+        return repr(value)
+
+    return pb.__class__.__name__ + ' ' + pformat_value(pb.__dict__, indent)
+
+
 def pprint(msg):
     msg_class = msg.__class__.__name__
     msg_size = msg.ByteSize()
-    if isinstance(msg, proto.FirmwareUpload) or isinstance(msg, proto.SelfTest):
-        return "<%s> (%d bytes):\n" % (msg_class, msg_size)
+    if isinstance(msg, proto.FirmwareUpload) or isinstance(msg, proto.SelfTest) \
+            or isinstance(msg, proto.Features):
+        return "<%s> (%d bytes)" % (msg_class, msg_size)
     else:
-        return "<%s> (%d bytes):\n%s" % (msg_class, msg_size, msg)
+        return "<%s> (%d bytes):\n%s" % (msg_class, msg_size, format_protobuf(msg))
 
 
 def log(msg):
@@ -104,6 +139,11 @@ def log(msg):
 class CallException(Exception):
     def __init__(self, code, message):
         super(CallException, self).__init__()
+        self.args = [code, message]
+
+
+class AssertionException(Exception):
+    def __init__(self, code, message):
         self.args = [code, message]
 
 
@@ -155,17 +195,13 @@ def session(f):
 
 
 def normalize_nfc(txt):
-    if sys.version_info[0] < 3:
-        if isinstance(txt, unicode):
-            return unicodedata.normalize('NFC', txt)
-        if isinstance(txt, str):
-            return unicodedata.normalize('NFC', txt.decode('utf-8'))
-    else:
-        if isinstance(txt, bytes):
-            return unicodedata.normalize('NFC', txt.decode('utf-8'))
-        if isinstance(txt, str):
-            return unicodedata.normalize('NFC', txt)
-    raise ValueError('unicode/str or bytes/str expected')
+    '''
+    Normalize message to NFC and return bytes suitable for protobuf.
+    This seems to be bitcoin-qt standard of doing things.
+    '''
+    if isinstance(txt, bytes):
+        txt = txt.decode('utf-8')
+    return unicodedata.normalize('NFC', txt).encode('utf-8')
 
 
 class BaseClient(object):
@@ -278,6 +314,14 @@ class TextUIMixin(object):
         return proto.PinMatrixAck(pin=pin)
 
     def callback_PassphraseRequest(self, msg):
+        if msg.on_device is True:
+            return proto.PassphraseAck()
+
+        if os.getenv("PASSPHRASE") is not None:
+            log("Passphrase required. Using PASSPHRASE environment variable.")
+            passphrase = Mnemonic.normalize_string(os.getenv("PASSPHRASE"))
+            return proto.PassphraseAck(passphrase=passphrase)
+
         log("Passphrase required: ")
         passphrase = getpass.getpass('')
         log("Confirm your Passphrase: ")
@@ -287,6 +331,9 @@ class TextUIMixin(object):
         else:
             log("Passphrase did not match! ")
             exit()
+
+    def callback_PassphraseStateRequest(self, msg):
+        return proto.PassphraseStateAck()
 
     def callback_WordRequest(self, msg):
         if msg.type in (proto.WordRequestType.Matrix9,
@@ -397,20 +444,19 @@ class DebugLinkMixin(object):
             try:
                 expected = self.expected_responses.pop(0)
             except IndexError:
-                raise CallException(proto.FailureType.UnexpectedMessage,
-                                    "Got %s, but no message has been expected" % pprint(msg))
+                raise AssertionException(proto.FailureType.UnexpectedMessage,
+                                         "Got %s, but no message has been expected" % pprint(msg))
 
             if msg.__class__ != expected.__class__:
-                raise CallException(proto.FailureType.UnexpectedMessage,
-                                    "Expected %s, got %s" % (pprint(expected), pprint(msg)))
+                raise AssertionException(proto.FailureType.UnexpectedMessage,
+                                         "Expected %s, got %s" % (pprint(expected), pprint(msg)))
 
             for field, value in expected.__dict__.items():
-                if getattr(expected, field) is None:
+                if value is None or value == []:
                     continue
-                print("EXPECTED", getattr(expected, field), getattr(msg, field), field, value)
                 if getattr(msg, field) != value:
-                    raise CallException(proto.FailureType.UnexpectedMessage,
-                                        "Expected %s, got %s" % (pprint(expected), pprint(msg)))
+                    raise AssertionException(proto.FailureType.UnexpectedMessage,
+                                             "Expected %s, got %s" % (pprint(expected), pprint(msg)))
 
     def callback_ButtonRequest(self, msg):
         log("ButtonRequest code: " + get_buttonrequest_value(msg.code))
@@ -433,6 +479,9 @@ class DebugLinkMixin(object):
         log("Provided passphrase: '%s'" % self.passphrase)
         return proto.PassphraseAck(passphrase=self.passphrase)
 
+    def callback_PassphraseStateRequest(self, msg):
+        return proto.PassphraseStateAck()
+
     def callback_WordRequest(self, msg):
         (word, pos) = self.debug.read_recovery_word()
         if word != '':
@@ -447,8 +496,9 @@ class ProtocolMixin(object):
     PRIME_DERIVATION_FLAG = 0x80000000
     VENDORS = ('bitcointrezor.com', 'trezor.io')
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, state=None, *args, **kwargs):
         super(ProtocolMixin, self).__init__(*args, **kwargs)
+        self.state = state
         self.init_device()
         self.tx_api = None
 
@@ -456,7 +506,10 @@ class ProtocolMixin(object):
         self.tx_api = tx_api
 
     def init_device(self):
-        self.features = expect(proto.Features)(self.call)(proto.Initialize())
+        init_msg = proto.Initialize()
+        if self.state is not None:
+            init_msg.state = self.state
+        self.features = expect(proto.Features)(self.call)(init_msg)
         if str(self.features.vendor) not in self.VENDORS:
             raise RuntimeError("Unsupported device")
 
@@ -562,13 +615,11 @@ class ProtocolMixin(object):
     @expect(proto.EthereumMessageSignature)
     def ethereum_sign_message(self, n, message):
         n = self._convert_prime(n)
-        # Convert message to UTF8 NFC (seems to be a bitcoin-qt standard)
-        message = normalize_nfc(message).encode('utf-8')
+        message = normalize_nfc(message)
         return self.call(proto.EthereumSignMessage(address_n=n, message=message))
 
     def ethereum_verify_message(self, address, signature, message):
-        # Convert message to UTF8 NFC (seems to be a bitcoin-qt standard)
-        message = normalize_nfc(message).encode('utf-8')
+        message = normalize_nfc(message)
         try:
             resp = self.call(proto.EthereumVerifyMessage(address=address, signature=signature, message=message))
         except CallException as e:
@@ -596,7 +647,7 @@ class ProtocolMixin(object):
 
     @field('message')
     @expect(proto.Success)
-    def apply_settings(self, label=None, language=None, use_passphrase=None, homescreen=None):
+    def apply_settings(self, label=None, language=None, use_passphrase=None, homescreen=None, passphrase_source=None):
         settings = proto.ApplySettings()
         if label is not None:
             settings.label = label
@@ -606,6 +657,8 @@ class ProtocolMixin(object):
             settings.use_passphrase = use_passphrase
         if homescreen is not None:
             settings.homescreen = homescreen
+        if passphrase_source is not None:
+            settings.passphrase_source = passphrase_source
 
         out = self.call(settings)
         self.init_device()  # Reload Features
@@ -633,8 +686,7 @@ class ProtocolMixin(object):
     @expect(proto.MessageSignature)
     def sign_message(self, coin_name, n, message, script_type=proto.InputScriptType.SPENDADDRESS):
         n = self._convert_prime(n)
-        # Convert message to UTF8 NFC (seems to be a bitcoin-qt standard)
-        message = normalize_nfc(message).encode('utf-8')
+        message = normalize_nfc(message)
         return self.call(proto.SignMessage(coin_name=coin_name, address_n=n, message=message, script_type=script_type))
 
     @expect(proto.SignedIdentity)
@@ -670,125 +722,17 @@ class ProtocolMixin(object):
     @expect(proto.NEMSignedTx)
     def nem_sign_tx(self, n, transaction):
         n = self._convert_prime(n)
+        try:
+            msg = nem.create_sign_tx(transaction)
+        except ValueError as e:
+            raise CallException(e.message)
 
-        def common_to_proto(common):
-            msg = proto.NEMTransactionCommon()
-            msg.network = (common["version"] >> 24) & 0xFF
-            msg.timestamp = common["timeStamp"]
-            msg.fee = common["fee"]
-            msg.deadline = common["deadline"]
-
-            if "signed" in common:
-                msg.signer = binascii.unhexlify(common["signer"])
-
-            return msg
-
-        def transfer_to_proto(transfer):
-            msg = proto.NEMTransfer()
-            msg.recipient = transfer["recipient"]
-            msg.amount = transfer["amount"]
-
-            if "payload" in transfer["message"]:
-                msg.payload = binascii.unhexlify(transfer["message"]["payload"])
-
-                if transfer["message"]["type"] == 0x02:
-                    msg.public_key = binascii.unhexlify(transfer["message"]["publicKey"])
-
-            if "mosaics" in transfer:
-                msg._extend_mosaics(proto.NEMMosaic(
-                    namespace=mosaic["mosaicId"]["namespaceId"],
-                    mosaic=mosaic["mosaicId"]["name"],
-                    quantity=mosaic["quantity"],
-                ) for mosaic in transfer["mosaics"])
-            return msg
-
-        def aggregate_modification_to_proto(aggregate_modification, msg):
-            msg._extend_modifications(proto.NEMCosignatoryModification(
-                type=modification["modificationType"],
-                public_key=binascii.unhexlify(modification["cosignatoryAccount"]),
-            ) for modification in aggregate_modification["modifications"])
-
-            if "minCosignatories" in aggregate_modification:
-                msg.relative_change = aggregate_modification["minCosignatories"]["relativeChange"]
-
-        def provision_namespace_to_proto(provision_namespace, msg):
-            msg.namespace = provision_namespace["newPart"]
-
-            if provision_namespace["parent"]:
-                msg.parent = provision_namespace["parent"]
-
-            msg.sink = provision_namespace["rentalFeeSink"]
-            msg.fee = provision_namespace["rentalFee"]
-
-        def mosaic_creation_to_proto(mosaic_creation):
-            msg = proto.NEMMosaicCreation()
-            msg.definition.namespace = mosaic_creation["mosaicDefinition"]["id"]["namespaceId"]
-            msg.definition.mosaic = mosaic_creation["mosaicDefinition"]["id"]["name"]
-
-            if mosaic_creation["mosaicDefinition"]["levy"]:
-                msg.definition.levy = mosaic_creation["mosaicDefinition"]["levy"]["type"]
-                msg.definition.fee = mosaic_creation["mosaicDefinition"]["levy"]["fee"]
-                msg.definition.levy_address = mosaic_creation["mosaicDefinition"]["levy"]["recipient"]
-                msg.definition.levy_namespace = mosaic_creation["mosaicDefinition"]["levy"]["mosaicId"]["namespaceId"]
-                msg.definition.levy_mosaic = mosaic_creation["mosaicDefinition"]["levy"]["mosaicId"]["name"]
-
-            msg.definition.description = mosaic_creation["mosaicDefinition"]["description"]
-
-            for property in mosaic_creation["mosaicDefinition"]["properties"]:
-                name = property["name"]
-                value = json.loads(property["value"])
-
-                if name == "divisibility":
-                    msg.definition.divisibility = value
-                elif name == "initialSupply":
-                    msg.definition.supply = value
-                elif name == "supplyMutable":
-                    msg.definition.mutable_supply = value
-                elif name == "transferable":
-                    msg.definition.transferable = value
-
-            msg.sink = mosaic_creation["creationFeeSink"]
-            msg.fee = mosaic_creation["creationFee"]
-            return msg
-
-        def mosaic_supply_change_to_proto(mosaic_supply_change):
-            msg = proto.NEMMosaicSupplyChange()
-            msg.namespace = mosaic_supply_change["mosaicId"]["namespaceId"]
-            msg.mosaic = mosaic_supply_change["mosaicId"]["name"]
-            msg.type = mosaic_supply_change["supplyType"]
-            msg.delta = mosaic_supply_change["delta"]
-            return msg
-
-        msg = proto.NEMSignTx()
-
-        msg.transaction = common_to_proto(transaction)
-        msg.transaction._extend_address_n(n)
-        msg.cosigning = (transaction["type"] == 0x1002)
-
-        if msg.cosigning or transaction["type"] == 0x1004:
-            transaction = transaction["otherTrans"]
-            msg.multisig = common_to_proto(transaction)
-        elif "otherTrans" in transaction:
-            raise CallException("Transaction does not support inner transaction")
-
-        if transaction["type"] == 0x0101:
-            msg.transfer = transfer_to_proto(transaction)
-        elif transaction["type"] == 0x1001:
-            aggregate_modification_to_proto(transaction, msg.aggregate_modification)
-        elif transaction["type"] == 0x2001:
-            provision_namespace_to_proto(transaction, msg.provision_namespace)
-        elif transaction["type"] == 0x4001:
-            msg = mosaic_creation_to_proto(transaction)
-        elif transaction["type"] == 0x4002:
-            msg.mosaic_supply_change = mosaic_supply_change_to_proto(transaction)
-        else:
-            raise CallException("Unknown transaction type")
-
+        assert msg.transaction is not None
+        msg.transaction.address_n = n
         return self.call(msg)
 
     def verify_message(self, coin_name, address, signature, message):
-        # Convert message to UTF8 NFC (seems to be a bitcoin-qt standard)
-        message = normalize_nfc(message).encode('utf-8')
+        message = normalize_nfc(message)
         try:
             resp = self.call(proto.VerifyMessage(address=address, signature=signature, message=message, coin_name=coin_name))
         except CallException as e:
@@ -834,26 +778,26 @@ class ProtocolMixin(object):
                                               ask_on_decrypt=ask_on_decrypt,
                                               iv=iv))
 
-    def _prepare_sign_tx(self, coin_name, inputs, outputs):
+    def _prepare_sign_tx(self, inputs, outputs):
         tx = proto.TransactionType()
-        tx._extend_inputs(inputs)
-        tx._extend_outputs(outputs)
-        tx._fill_missing()
+        tx.inputs = inputs
+        tx.outputs = outputs
 
-        txes = {}
-        txes[None] = tx
+        txes = {None: tx}
 
-        known_hashes = []
         for inp in inputs:
-            if inp.prev_hash in known_hashes:
+            if inp.prev_hash in txes:
                 continue
 
-            if self.tx_api:
-                txes[inp.prev_hash] = self.tx_api.get_tx(binascii.hexlify(inp.prev_hash).decode('utf-8'))
-                txes[inp.prev_hash]._fill_missing()
-            else:
+            if inp.script_type in (proto.InputScriptType.SPENDP2SHWITNESS,
+                                   proto.InputScriptType.SPENDWITNESS):
+                continue
+
+            if not self.tx_api:
                 raise RuntimeError('TX_API not defined')
-            known_hashes.append(inp.prev_hash)
+
+            prev_tx = self.tx_api.get_tx(binascii.hexlify(inp.prev_hash).decode('utf-8'))
+            txes[inp.prev_hash] = prev_tx
 
         return txes
 
@@ -861,7 +805,7 @@ class ProtocolMixin(object):
     def sign_tx(self, coin_name, inputs, outputs, version=None, lock_time=None, debug_processor=None):
 
         start = time.time()
-        txes = self._prepare_sign_tx(coin_name, inputs, outputs)
+        txes = self._prepare_sign_tx(inputs, outputs)
 
         # Prepare and send initial message
         tx = proto.SignTx()
@@ -890,7 +834,7 @@ class ProtocolMixin(object):
 
             # If there's some part of signed transaction, let's add it
             if res.serialized and res.serialized.serialized_tx:
-                log("RECEIVED PART OF SERIALIZED TX (%d BYTES)" % len(res.serialized.serialized_tx))
+                # log("RECEIVED PART OF SERIALIZED TX (%d BYTES)" % len(res.serialized.serialized_tx))
                 serialized_tx += res.serialized.serialized_tx
 
             if res.serialized and res.serialized.signature_index is not None:
@@ -923,11 +867,15 @@ class ProtocolMixin(object):
 
             elif res.request_type == proto.RequestType.TXINPUT:
                 msg = proto.TransactionType()
-                msg._extend_inputs([current_tx.inputs[res.details.request_index], ])
+                msg.inputs = [current_tx.inputs[res.details.request_index]]
                 if debug_processor is not None:
+                    # msg needs to be deep copied so when it's modified
+                    # the other messages stay intact
+                    from copy import deepcopy
+                    msg = deepcopy(msg)
                     # If debug_processor function is provided,
                     # pass thru it the request and prepared response.
-                    # This is useful for unit tests, see test_msg_signtx
+                    # This is useful for tests, see test_msg_signtx
                     msg = debug_processor(res, msg)
 
                 res = self.call(proto.TxAck(tx=msg))
@@ -936,14 +884,18 @@ class ProtocolMixin(object):
             elif res.request_type == proto.RequestType.TXOUTPUT:
                 msg = proto.TransactionType()
                 if res.details.tx_hash:
-                    msg._extend_bin_outputs([current_tx.bin_outputs[res.details.request_index], ])
+                    msg.bin_outputs = [current_tx.bin_outputs[res.details.request_index]]
                 else:
-                    msg._extend_outputs([current_tx.outputs[res.details.request_index], ])
+                    msg.outputs = [current_tx.outputs[res.details.request_index]]
 
                 if debug_processor is not None:
+                    # msg needs to be deep copied so when it's modified
+                    # the other messages stay intact
+                    from copy import deepcopy
+                    msg = deepcopy(msg)
                     # If debug_processor function is provided,
                     # pass thru it the request and prepared response.
-                    # This is useful for unit tests, see test_msg_signtx
+                    # This is useful for tests, see test_msg_signtx
                     msg = debug_processor(res, msg)
 
                 res = self.call(proto.TxAck(tx=msg))
@@ -959,8 +911,8 @@ class ProtocolMixin(object):
         if None in signatures:
             raise RuntimeError("Some signatures are missing!")
 
-        log("SIGNED IN %.03f SECONDS, CALLED %d MESSAGES, %d BYTES" %
-            (time.time() - start, counter, len(serialized_tx)))
+        # log("SIGNED IN %.03f SECONDS, CALLED %d MESSAGES, %d BYTES" %
+        #    (time.time() - start, counter, len(serialized_tx)))
 
         return (signatures, serialized_tx)
 
@@ -1154,12 +1106,15 @@ class ProtocolMixin(object):
 
 
 class TrezorClient(ProtocolMixin, TextUIMixin, BaseClient):
-    pass
+    def __init__(self, transport, *args, **kwargs):
+        super().__init__(transport=transport, *args, **kwargs)
 
 
 class TrezorClientVerbose(ProtocolMixin, TextUIMixin, VerboseWireMixin, BaseClient):
-    pass
+    def __init__(self, transport, *args, **kwargs):
+        super().__init__(transport=transport, *args, **kwargs)
 
 
 class TrezorClientDebugLink(ProtocolMixin, DebugLinkMixin, VerboseWireMixin, BaseClient):
-    pass
+    def __init__(self, transport, *args, **kwargs):
+        super().__init__(transport=transport, *args, **kwargs)

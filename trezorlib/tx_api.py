@@ -31,6 +31,7 @@ class TxApi(object):
     def __init__(self, network, url):
         self.network = network
         self.url = url
+        self.pushtx_url = url
 
     def get_url(self, resource, resourceid):
         url = '%s%s/%s' % (self.url, resource, resourceid)
@@ -68,6 +69,7 @@ class TxApiInsight(TxApi):
     def __init__(self, network, url, zcash=None):
         super(TxApiInsight, self).__init__(network, url)
         self.zcash = zcash
+        self.pushtx_url = url.replace('/api/', '/tx/send')
 
     def get_tx(self, txhash):
 
@@ -149,13 +151,17 @@ class TxApiSmartbit(TxApi):
 
 class TxApiBlockCypher(TxApi):
 
+    def __init__(self, network, url, zcash=None):
+        super(TxApiBlockCypher, self).__init__(network, url)
+        self.pushtx_url = url.replace('//api.', '//live.').replace('/v1/', '/').replace('/main/', '/pushtx/')
+
     def get_tx(self, txhash):
 
         data = self.fetch_json('txs', txhash)
 
         t = proto.TransactionType()
         t.version = data['ver']
-        t.lock_time = data['lock_time']
+        t.lock_time = data.get('lock_time', 0)
 
         for vin in data['inputs']:
             i = t._add_inputs()
@@ -184,6 +190,8 @@ TxApiLitecoin = TxApiInsight(network='insight_litecoin', url='https://ltc-bitcor
 TxApiDash = TxApiInsight(network='insight_dash', url='https://dash-bitcore1.trezor.io/api/')
 TxApiZcash = TxApiInsight(network='insight_zcash', url='https://zec-bitcore1.trezor.io/api/', zcash=True)
 TxApiBcash = TxApiInsight(network='insight_bcash', url='https://bch-bitcore2.trezor.io/api/')
+TxApiBitcoinGold = TxApiInsight(network='insight_bitcoin_gold', url='https://btg-bitcore2.trezor.io/api/')
 TxApiDecredTestnet = TxApiInsight(network='insight_decred_testnet', url='https://testnet.decred.org/api/')
-TxApiDogecoin = TxApiBlockCypher(network='blockcypher_dogecoin', url='http://api.blockcypher.com/v1/doge/main/')
+TxApiDogecoin = TxApiBlockCypher(network='blockcypher_dogecoin', url='https://api.blockcypher.com/v1/doge/main/')
 TxApiSegnet = TxApiSmartbit(network='smartbit_segnet', url='https://segnet-api.smartbit.com.au/v1/blockchain/')
+TxApiMonacoin = TxApiInsight(network='insight_monacoin', url='https://mona.insight.monaco-ex.org/insight-api-monacoin/')

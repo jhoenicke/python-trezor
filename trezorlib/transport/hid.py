@@ -16,22 +16,21 @@
 # You should have received a copy of the GNU Lesser General Public License
 # along with this library.  If not, see <http://www.gnu.org/licenses/>.
 
-from __future__ import absolute_import
-
 import time
 import hid
 import os
+import sys
 
-from .protocol_v1 import ProtocolV1
-from .protocol_v2 import ProtocolV2
-from .transport import Transport, TransportException
+from ..protocol_v1 import ProtocolV1
+from ..protocol_v2 import ProtocolV2
+from . import Transport, TransportException
 
 DEV_TREZOR1 = (0x534c, 0x0001)
 DEV_TREZOR2 = (0x1209, 0x53c1)
 DEV_TREZOR2_BL = (0x1209, 0x53c0)
 
 
-class HidHandle(object):
+class HidHandle:
 
     def __init__(self, path):
         self.path = path
@@ -41,7 +40,12 @@ class HidHandle(object):
     def open(self):
         if self.count == 0:
             self.handle = hid.device()
-            self.handle.open_path(self.path)
+            try:
+                self.handle.open_path(self.path)
+            except (IOError, OSError) as e:
+                if sys.platform.startswith('linux'):
+                    e.args = e.args + ('Do you have udev rules installed? https://github.com/trezor/trezor-common/blob/master/udev/51-trezor.rules', )
+                raise e
             self.handle.set_nonblocking(True)
         self.count += 1
 
@@ -57,6 +61,8 @@ class HidTransport(Transport):
     HidTransport implements transport over USB HID interface.
     '''
 
+    PATH_PREFIX = 'hid'
+
     def __init__(self, device, protocol=None, hid_handle=None):
         super(HidTransport, self).__init__()
 
@@ -64,7 +70,8 @@ class HidTransport(Transport):
             hid_handle = HidHandle(device['path'])
 
         if protocol is None:
-            force_v1 = os.environ.get('TREZOR_TRANSPORT_V1', '0')
+            # force_v1 = os.environ.get('TREZOR_TRANSPORT_V1', '0')
+            force_v1 = True
 
             if is_trezor2(device) and not int(force_v1):
                 protocol = ProtocolV2()
@@ -76,8 +83,8 @@ class HidTransport(Transport):
         self.hid = hid_handle
         self.hid_version = None
 
-    def __str__(self):
-        return self.device['path'].decode()
+    def get_path(self):
+        return "%s:%s" % (self.PATH_PREFIX, self.device['path'].decode())
 
     @staticmethod
     def enumerate(debug=False):
@@ -93,13 +100,6 @@ class HidTransport(Transport):
                     continue
             devices.append(HidTransport(dev))
         return devices
-
-    @staticmethod
-    def find_by_path(path=None):
-        for transport in HidTransport.enumerate():
-            if path is None or transport.device['path'] == path:
-                return transport
-        raise TransportException('HID device not found')
 
     def find_debug(self):
         if isinstance(self.protocol, ProtocolV2):

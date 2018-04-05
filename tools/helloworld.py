@@ -1,21 +1,11 @@
-#!/usr/bin/env python
-from __future__ import print_function
-
+#!/usr/bin/env python3
 from trezorlib.client import TrezorClient
-from trezorlib.transport_hid import HidTransport
+from trezorlib.transport import get_transport
 
 
 def main():
-    # List all connected TREZORs on USB
-    devices = HidTransport.enumerate()
-
-    # Check whether we found any
-    if len(devices) == 0:
-        print('No TREZOR found')
-        return
-
     # Use first connected device
-    transport = devices[0]
+    transport = get_transport()
 
     # Creates object for manipulating TREZOR
     client = TrezorClient(transport)

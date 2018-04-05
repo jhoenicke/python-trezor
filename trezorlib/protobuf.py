@@ -76,6 +76,10 @@ class Sint32Type:
     WIRE_TYPE = 0
 
 
+class Sint64Type:
+    WIRE_TYPE = 0
+
+
 class BoolType:
     WIRE_TYPE = 0
 
@@ -102,7 +106,12 @@ class MessageType:
                 self.__dict__ == rhs.__dict__)
 
     def __repr__(self):
-        return '<%s: %s>' % (self.__class__.__name__, self.__dict__)
+        d = {}
+        for key, value in self.__dict__.items():
+            if value is None or value == []:
+                continue
+            d[key] = value
+        return '<%s: %s>' % (self.__class__.__name__, d)
 
     def __iter__(self):
         return self.__dict__.__iter__()
@@ -230,15 +239,18 @@ def load_message(reader, msg_type):
             fvalue = ivalue
         elif ftype is Sint32Type:
             fvalue = (ivalue >> 1) ^ ((ivalue << 31) & 0xffffffff)
+        elif ftype is Sint64Type:
+            fvalue = (ivalue >> 1) ^ ((ivalue << 63) & 0xffffffffffffffff)
         elif ftype is BoolType:
             fvalue = bool(ivalue)
         elif ftype is BytesType:
-            fvalue = bytearray(ivalue)
-            reader.readinto(fvalue)
+            buf = bytearray(ivalue)
+            reader.readinto(buf)
+            fvalue = bytes(buf)
         elif ftype is UnicodeType:
-            fvalue = bytearray(ivalue)
-            reader.readinto(fvalue)
-            fvalue = fvalue.decode()
+            buf = bytearray(ivalue)
+            reader.readinto(buf)
+            fvalue = buf.decode()
         elif issubclass(ftype, MessageType):
             fvalue = load_message(LimitedReader(reader, ivalue), ftype)
         else:
@@ -259,10 +271,7 @@ def dump_message(writer, msg):
     fields = mtype.FIELDS
 
     for ftag in fields:
-        field = fields[ftag]
-        fname = field[0]
-        ftype = field[1]
-        fflags = field[2]
+        fname, ftype, fflags = fields[ftag]
 
         fvalue = getattr(msg, fname, None)
         if fvalue is None:
@@ -282,6 +291,9 @@ def dump_message(writer, msg):
 
             elif ftype is Sint32Type:
                 dump_uvarint(writer, ((svalue << 1) & 0xffffffff) ^ (svalue >> 31))
+
+            elif ftype is Sint64Type:
+                dump_uvarint(writer, ((svalue << 1) & 0xffffffffffffffff) ^ (svalue >> 63))
 
             elif ftype is BoolType:
                 dump_uvarint(writer, int(svalue))

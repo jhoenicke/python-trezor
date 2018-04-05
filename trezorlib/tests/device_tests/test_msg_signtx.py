@@ -604,6 +604,9 @@ class TestMsgSigntx(TrezorTest):
             if req.details.request_index != 1:
                 return msg
 
+            if req.request_type != proto.RequestType.TXOUTPUT:
+                return msg
+
             if not run_attack:
                 run_attack = True
                 return msg
@@ -618,8 +621,13 @@ class TestMsgSigntx(TrezorTest):
         assert hexlify(serialized_tx) == b'01000000021c032e5715d1da8115a2fe4f57699e15742fe113b0d2d1ca3b594649d322bec6010000006b483045022100f773c403b2f85a5c1d6c9c4ad69c43de66930fff4b1bc818eb257af98305546a0220443bde4be439f276a6ce793664b463580e210ec6c9255d68354449ac0443c76501210338d78612e990f2eea0c426b5e48a8db70b9d7ed66282b3b26511e0b1c75515a6ffffffff6ea42cd8d9c8e5441c4c5f85bfe50311078730d2881494f11f4d2257777a4958010000006b48304502210090cff1c1911e771605358a8cddd5ae94c7b60cc96e50275908d9bf9d6367c79f02202bfa72e10260a146abd59d0526e1335bacfbb2b4401780e9e3a7441b0480c8da0121038caebd6f753bbbd2bb1f3346a43cd32140648583673a31d62f2dfb56ad0ab9e3ffffffff02a0860100000000001976a9142f4490d5263906e4887ca2996b9e207af3e7824088aca0860100000000001976a914812c13d97f9159e54e326b481b8f88a73df8507a88ac00000000'
 
         # Now run the attack, must trigger the exception
-        with pytest.raises(CallException):
+        try:
             self.client.sign_tx('Bitcoin', [inp1, inp2], [out1, out2], debug_processor=attack_processor)
+        except CallException as exc:
+            assert exc.args[0] == proto.FailureType.ProcessError
+            assert exc.args[1] == 'Transaction has changed during signing'
+        else:
+            assert False  # exception expected
 
     def test_attack_change_input_address(self):
         # This unit test attempts to modify input address after the Trezor checked
@@ -652,7 +660,6 @@ class TestMsgSigntx(TrezorTest):
         run_attack = True
 
         def attack_processor(req, msg):
-            import sys
             global run_attack
 
             if req.details.tx_hash is not None:
@@ -691,8 +698,14 @@ class TestMsgSigntx(TrezorTest):
                 proto.TxRequest(request_type=proto.RequestType.TXINPUT, details=proto.TxRequestDetailsType(request_index=0)),
                 proto.Failure(code=proto.FailureType.ProcessError),
             ])
-            with pytest.raises(CallException):
+            # Now run the attack, must trigger the exception
+            try:
                 self.client.sign_tx('Testnet', [inp1], [out1, out2], debug_processor=attack_processor)
+            except CallException as exc:
+                assert exc.args[0] == proto.FailureType.ProcessError
+                assert exc.args[1] == 'Transaction has changed during signing'
+            else:
+                assert False  # exception expected
 
     def test_spend_coinbase(self):
         # 25 TEST generated to m/1 (mfiGQVPcRcaEvQPYDErR34DcCovtxYvUUV)
@@ -733,3 +746,113 @@ class TestMsgSigntx(TrezorTest):
 
         # Accepted by network: tx
         assert hexlify(serialized_tx) == b'010000000136825bfdb78c8ede226c7c4f25a018e99a2c061d63c7fb425fca7c7d6721dad6000000006a473044022047845c366eb24f40be315c7815a154513c444c7989eb80f7ce7ff6aeb703d26a022007c1f5efadf67c5889634fd7ac39a7ce78bffac291673e8772ecd8389c901d9f01210338d78612e990f2eea0c426b5e48a8db70b9d7ed66282b3b26511e0b1c75515a6ffffffff01c6100795000000001976a9143d2496e67f5f57a924353da42d4725b318e7a8ea88ac00000000'
+
+    def test_two_changes(self):
+        self.setup_mnemonic_allallall()
+        # see 87be0736f202f7c2bff0781b42bad3e0cdcb54761939da69ea793a3735552c56
+
+        # tx: e5040e1bc1ae7667ffb9e5248e90b2fb93cd9150234151ce90e14ab2f5933bcd
+        # input 0: 0.31 BTC
+        inp1 = proto.TxInputType(
+            address_n=self.client.expand_path("44'/1'/0'/0/0"),
+            # amount=31000000,
+            prev_hash=TXHASH_e5040e,
+            prev_index=0,
+        )
+
+        out1 = proto.TxOutputType(
+            address='msj42CCGruhRsFrGATiUuh25dtxYtnpbTx',
+            amount=30090000,
+            script_type=proto.OutputScriptType.PAYTOADDRESS,
+        )
+
+        out_change1 = proto.TxOutputType(
+            address_n=self.client.expand_path("44'/1'/0'/1/0"),
+            amount=900000,
+            script_type=proto.OutputScriptType.PAYTOADDRESS,
+        )
+
+        out_change2 = proto.TxOutputType(
+            address_n=self.client.expand_path("44'/1'/0'/1/1"),
+            amount=10000,
+            script_type=proto.OutputScriptType.PAYTOADDRESS,
+        )
+
+        with self.client:
+            self.client.set_tx_api(TxApiTestnet)
+            self.client.set_expected_responses([
+                proto.TxRequest(request_type=proto.RequestType.TXINPUT, details=proto.TxRequestDetailsType(request_index=0)),
+                proto.TxRequest(request_type=proto.RequestType.TXMETA, details=proto.TxRequestDetailsType(tx_hash=TXHASH_e5040e)),
+                proto.TxRequest(request_type=proto.RequestType.TXINPUT, details=proto.TxRequestDetailsType(request_index=0, tx_hash=TXHASH_e5040e)),
+                proto.TxRequest(request_type=proto.RequestType.TXOUTPUT, details=proto.TxRequestDetailsType(request_index=0, tx_hash=TXHASH_e5040e)),
+                proto.TxRequest(request_type=proto.RequestType.TXOUTPUT, details=proto.TxRequestDetailsType(request_index=1, tx_hash=TXHASH_e5040e)),
+                proto.TxRequest(request_type=proto.RequestType.TXOUTPUT, details=proto.TxRequestDetailsType(request_index=0)),
+                proto.ButtonRequest(code=proto.ButtonRequestType.ConfirmOutput),
+                proto.TxRequest(request_type=proto.RequestType.TXOUTPUT, details=proto.TxRequestDetailsType(request_index=1)),
+                proto.TxRequest(request_type=proto.RequestType.TXOUTPUT, details=proto.TxRequestDetailsType(request_index=2)),
+                proto.ButtonRequest(code=proto.ButtonRequestType.ConfirmOutput),
+
+                proto.ButtonRequest(code=proto.ButtonRequestType.SignTx),
+                proto.TxRequest(request_type=proto.RequestType.TXINPUT, details=proto.TxRequestDetailsType(request_index=0)),
+                proto.TxRequest(request_type=proto.RequestType.TXOUTPUT, details=proto.TxRequestDetailsType(request_index=0)),
+                proto.TxRequest(request_type=proto.RequestType.TXOUTPUT, details=proto.TxRequestDetailsType(request_index=1)),
+                proto.TxRequest(request_type=proto.RequestType.TXOUTPUT, details=proto.TxRequestDetailsType(request_index=2)),
+
+                proto.TxRequest(request_type=proto.RequestType.TXOUTPUT, details=proto.TxRequestDetailsType(request_index=0)),
+                proto.TxRequest(request_type=proto.RequestType.TXOUTPUT, details=proto.TxRequestDetailsType(request_index=1)),
+                proto.TxRequest(request_type=proto.RequestType.TXOUTPUT, details=proto.TxRequestDetailsType(request_index=2)),
+                proto.TxRequest(request_type=proto.RequestType.TXFINISHED),
+            ])
+
+            self.client.sign_tx('Testnet', [inp1, ], [out1, out_change1, out_change2])
+
+    def test_change_on_main_chain_allowed(self):
+        self.setup_mnemonic_allallall()
+        # see 87be0736f202f7c2bff0781b42bad3e0cdcb54761939da69ea793a3735552c56
+
+        # tx: e5040e1bc1ae7667ffb9e5248e90b2fb93cd9150234151ce90e14ab2f5933bcd
+        # input 0: 0.31 BTC
+        inp1 = proto.TxInputType(
+            address_n=self.client.expand_path("44'/1'/0'/0/0"),
+            # amount=31000000,
+            prev_hash=TXHASH_e5040e,
+            prev_index=0,
+        )
+
+        out1 = proto.TxOutputType(
+            address='msj42CCGruhRsFrGATiUuh25dtxYtnpbTx',
+            amount=30090000,
+            script_type=proto.OutputScriptType.PAYTOADDRESS,
+        )
+
+        # change on main chain is allowed => treated as a change
+        out_change = proto.TxOutputType(
+            address_n=self.client.expand_path("44'/1'/0'/0/0"),
+            amount=900000,
+            script_type=proto.OutputScriptType.PAYTOADDRESS,
+        )
+
+        with self.client:
+            self.client.set_tx_api(TxApiTestnet)
+            self.client.set_expected_responses([
+                proto.TxRequest(request_type=proto.RequestType.TXINPUT, details=proto.TxRequestDetailsType(request_index=0)),
+                proto.TxRequest(request_type=proto.RequestType.TXMETA, details=proto.TxRequestDetailsType(tx_hash=TXHASH_e5040e)),
+                proto.TxRequest(request_type=proto.RequestType.TXINPUT, details=proto.TxRequestDetailsType(request_index=0, tx_hash=TXHASH_e5040e)),
+                proto.TxRequest(request_type=proto.RequestType.TXOUTPUT, details=proto.TxRequestDetailsType(request_index=0, tx_hash=TXHASH_e5040e)),
+                proto.TxRequest(request_type=proto.RequestType.TXOUTPUT, details=proto.TxRequestDetailsType(request_index=1, tx_hash=TXHASH_e5040e)),
+
+                proto.TxRequest(request_type=proto.RequestType.TXOUTPUT, details=proto.TxRequestDetailsType(request_index=0)),
+                proto.ButtonRequest(code=proto.ButtonRequestType.ConfirmOutput),
+                proto.TxRequest(request_type=proto.RequestType.TXOUTPUT, details=proto.TxRequestDetailsType(request_index=1)),
+
+                proto.ButtonRequest(code=proto.ButtonRequestType.SignTx),
+                proto.TxRequest(request_type=proto.RequestType.TXINPUT, details=proto.TxRequestDetailsType(request_index=0)),
+                proto.TxRequest(request_type=proto.RequestType.TXOUTPUT, details=proto.TxRequestDetailsType(request_index=0)),
+                proto.TxRequest(request_type=proto.RequestType.TXOUTPUT, details=proto.TxRequestDetailsType(request_index=1)),
+
+                proto.TxRequest(request_type=proto.RequestType.TXOUTPUT, details=proto.TxRequestDetailsType(request_index=0)),
+                proto.TxRequest(request_type=proto.RequestType.TXOUTPUT, details=proto.TxRequestDetailsType(request_index=1)),
+                proto.TxRequest(request_type=proto.RequestType.TXFINISHED),
+            ])
+
+            self.client.sign_tx('Testnet', [inp1, ], [out1, out_change])

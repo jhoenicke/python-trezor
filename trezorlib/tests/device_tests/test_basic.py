@@ -24,8 +24,9 @@ from trezorlib import messages
 class TestBasic(TrezorTest):
 
     def test_features(self):
-        features = self.client.call(messages.Initialize())
-        assert features == self.client.features
+        f0 = self.client.features
+        f1 = self.client.call(messages.Initialize())
+        assert f0 == f1
 
     def test_ping(self):
         ping = self.client.call(messages.Ping(message='ahoj!'))
