@@ -91,7 +91,11 @@ def sign_tx(client, coin_name, inputs, outputs, details=None, prev_txes=None):
     # set up a transactions dict
     txes = {None: messages.TransactionType(inputs=inputs, outputs=outputs)}
     # preload all relevant transactions ahead of time
-    if not coins.by_name[coin_name]["force_bip143"]:
+    if coin_name in coins.by_name:
+        load_prevtxes = not coins.by_name[coin_name]["force_bip143"]
+    else:
+        load_prevtxes = True
+    if load_prevtxes:
         for inp in inputs:
             if inp.script_type not in (
                 messages.InputScriptType.SPENDP2SHWITNESS,
